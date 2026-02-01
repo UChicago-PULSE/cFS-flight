@@ -1,4 +1,4 @@
-add_library(ut_vxworks_impl_stubs
+add_library(ut_vxworks_impl_stubs STATIC EXCLUDE_FROM_ALL
     src/vxworks-os-impl-binsem-stubs.c
     src/vxworks-os-impl-common-stubs.c
     src/vxworks-os-impl-countsem-stubs.c

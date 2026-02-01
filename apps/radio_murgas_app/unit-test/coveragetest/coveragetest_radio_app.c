@@ -168,7 +168,7 @@ void Test_RADIO_APP_Noop(void)
     /*
      * Set up event checking
      */
-    UT_CHECKEVENT_SETUP(&EventTest, RADIO_APP_COMMANDNOP_INF_EID, NULL);
+    UT_CHECKEVENT_SETUP(&EventTest, RADIO_APP_COMMANDNOOP_INF_EID, NULL);
 
     /*
      * Nominal case
@@ -209,7 +209,7 @@ void Test_RADIO_APP_ResetCounters(void)
     /*
      * Set up event checking
      */
-    UT_CHECKEVENT_SETUP(&EventTest, RADIO_APP_COMMANDRST_INF_EID, NULL);
+    UT_CHECKEVENT_SETUP(&EventTest, RADIO_APP_COMMANDRESET_INF_EID, NULL);
 
     /*
      * Nominal case
@@ -237,7 +237,6 @@ void Test_RADIO_APP_VerifyCmdLength(void)
      */
 
     CFE_MSG_Message_t Msg;
-    size_t            ActualSize;
     bool              result;
 
     /*
