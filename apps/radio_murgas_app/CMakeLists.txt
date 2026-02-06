@@ -10,6 +10,10 @@ target_include_directories(radio_murgas_app PUBLIC
   fsw/platform_inc
   ../bus_comms/fsw/src
   ../bus_comms/fsw/platform_inc
+  ../cf/fsw/inc
+  ../cf/config
+  ../to_lab/fsw/src
+  ../to_lab/fsw/platform_inc
 )
 
 # If UT is enabled, then add the tests from the subdirectory

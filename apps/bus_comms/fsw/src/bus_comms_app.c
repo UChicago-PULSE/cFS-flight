@@ -25,7 +25,7 @@
 extern int32 OS_Milli2Ticks(uint32 milli_seconds, int *ticks);
 
 // CSP configuration (adjust as needed)
-#define BUS_COMMS_CSP_CAN_IF     "can1"
+#define BUS_COMMS_CSP_CAN_IF     "vcan0"
 #define BUS_COMMS_CSP_BITRATE    0
 #define BUS_COMMS_CSP_MY_ADDR    1
 #define BUS_COMMS_CSP_DEST_ADDR  2

@@ -52,6 +52,9 @@
 #include "lc_msgids.h"
 #endif
 
+#ifdef HAVE_CF
+#include "cf_msgids.h"
+#endif
 
 /*
 ** Include headers for message IDs here
@@ -87,6 +90,9 @@ SCH_LAB_ScheduleTable_t SCH_TBL_Structure = {.TickRate = 100,
                                             #endif
                                             #ifdef HAVE_SAMPLE_APP
                                                  {CFE_SB_MSGID_WRAP_VALUE(SAMPLE_APP_SEND_HK_MID), 93, 0},
+                                            #endif
+                                            #ifdef HAVE_CF
+                                                 {CFE_SB_MSGID_WRAP_VALUE(CF_WAKE_UP_MID), 20, 0},  /* 5 Hz wake-up so CF sends PDUs (TickRate 100 -> 100/20=5 per sec) */
                                             #endif
                                             #ifdef HAVE_SC
                                                  {CFE_SB_MSGID_WRAP_VALUE(SC_SEND_HK_MID), 92, 0},
