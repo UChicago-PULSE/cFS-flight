@@ -23,10 +23,21 @@
 #include "bus_comms_msg.h"
 #include "bus_comms_msgids.h"
 #include "osapi-file.h"
+#include "cf_msgids.h"
+#include "cf_msgstruct.h"
+#include "cf_fcncodes.h"
+#include "cf_extern_typedefs.h"
+#include "to_lab_msg.h"
+#include "to_lab_msgids.h"
+#include "osapi.h"
 #include <string.h>
 
-#define RADIO_APP_RADIO_NODE_ADDR 2
-#define RADIO_APP_CONFIG_PORT     7
+#define RADIO_APP_RADIO_NODE_ADDR  2
+#define RADIO_APP_CONFIG_PORT      7
+#define RADIO_APP_CFDP_DEST_EID   2   /* Python remote (remote.py) entity ID */
+#define RADIO_APP_TO_LAB_DEST_IP  "127.0.0.1"
+#define RADIO_APP_STARTUP_CFDP_SRC "/cf/test.txt"  /* file to transfer on first run */
+#define RADIO_APP_TO_LAB_ENABLE_DELAY_MS 1000      /* allow TO_Lab to process EnableOutput before CF starts sending */
 
 RADIO_APP_Data_t RADIO_APP_Data;
 
@@ -128,6 +139,16 @@ int32 RADIO_APP_Init(void)
 
     CFE_EVS_SendEvent(RADIO_APP_STARTUP_INF_EID, CFE_EVS_EventType_INFORMATION, "Radio App Initialized.%s",
                       RADIO_APP_VERSION_STRING);
+
+    /* Trigger one CFDP transfer on startup (TO_LAB_EnableOutput + CF_TX_FILE) */
+    {
+        RADIO_APP_TransmitFileCmd_t StartupCmd;
+
+        memset(&StartupCmd, 0, sizeof(StartupCmd));
+        strncpy(StartupCmd.Filename, RADIO_APP_STARTUP_CFDP_SRC, sizeof(StartupCmd.Filename) - 1);
+        StartupCmd.Filename[sizeof(StartupCmd.Filename) - 1] = '\0';
+        (void)RADIO_APP_TransmitFile(&StartupCmd);
+    }
 
     return CFE_SUCCESS;
 }
@@ -318,15 +339,11 @@ int32 RADIO_APP_RequestHousekeeping(const RADIO_APP_HkRequestCmd_t *Msg)
 
 int32 RADIO_APP_TransmitFile(const RADIO_APP_TransmitFileCmd_t *Msg)
 {
-    int32      status;
-    osal_id_t  FileHandle = OS_OBJECT_ID_UNDEFINED;
-    int32      OsStatus;
-    uint8      ChunkBuffer[BUS_COMMS_MAX_SEND_LEN];
-    int32      BytesRead;
-    uint32     TotalBytesSent = 0;
-    uint16     ChunkCount     = 0;
-    size_t     FilenameLen;
-    int32      CloseStatus;
+    int32                  status;
+    size_t                 FilenameLen;
+    const char *          basename_ptr;
+    TO_LAB_EnableOutputCmd_t ToLabCmd;
+    CF_TxFileCmd_t        CfCmd;
 
     RADIO_APP_Data.CmdCounter++;
 
@@ -340,7 +357,6 @@ int32 RADIO_APP_TransmitFile(const RADIO_APP_TransmitFileCmd_t *Msg)
         return CFE_SB_BAD_ARGUMENT;
     }
 
-    /* Validate filename length */
     if (FilenameLen >= OS_MAX_PATH_LEN)
     {
         CFE_EVS_SendEvent(RADIO_APP_FILE_OPEN_ERR_EID, CFE_EVS_EventType_ERROR,
@@ -350,67 +366,59 @@ int32 RADIO_APP_TransmitFile(const RADIO_APP_TransmitFileCmd_t *Msg)
         return CFE_SB_BAD_ARGUMENT;
     }
 
-    /* Open file - OS_FILE_FLAG_NONE ensures file is NOT created if it doesn't exist */
-    OsStatus = OS_OpenCreate(&FileHandle, Msg->Filename, OS_FILE_FLAG_NONE, OS_READ_ONLY);
+    /* 1. Enable TO_Lab telemetry output to ground (so CFDP PDUs reach remote.py) */
+    memset(&ToLabCmd, 0, sizeof(ToLabCmd));
+    CFE_MSG_Init(CFE_MSG_PTR(ToLabCmd.CmdHeader), CFE_SB_ValueToMsgId(TO_LAB_CMD_MID), sizeof(ToLabCmd));
+    CFE_MSG_SetFcnCode(CFE_MSG_PTR(ToLabCmd.CmdHeader), TO_LAB_OUTPUT_ENABLE_CC);
+    strncpy(ToLabCmd.Payload.dest_IP, RADIO_APP_TO_LAB_DEST_IP, sizeof(ToLabCmd.Payload.dest_IP) - 1);
+    ToLabCmd.Payload.dest_IP[sizeof(ToLabCmd.Payload.dest_IP) - 1] = '\0';
 
-    /* Check if file open failed (file doesn't exist or other error) */
-    if (OsStatus != OS_SUCCESS)
+    status = CFE_SB_TransmitMsg(CFE_MSG_PTR(ToLabCmd.CmdHeader), true);
+    if (status != CFE_SUCCESS)
     {
-        CFE_EVS_SendEvent(RADIO_APP_FILE_OPEN_ERR_EID, CFE_EVS_EventType_ERROR,
-                          "RADIO: Failed to open file '%s', RC = 0x%08lX", Msg->Filename, (unsigned long)OsStatus);
+        CFE_EVS_SendEvent(RADIO_APP_FILE_TX_ERR_EID, CFE_EVS_EventType_ERROR,
+                          "RADIO: Failed to send TO_LAB_EnableOutput, RC = 0x%08lX", (unsigned long)status);
         RADIO_APP_Data.ErrCounter++;
-        return CFE_STATUS_EXTERNAL_RESOURCE_FAIL;
+        return status;
     }
 
-    /* Read and send chunks */
-    while ((BytesRead = OS_read(FileHandle, ChunkBuffer, BUS_COMMS_MAX_SEND_LEN)) > 0)
-    {
-        /* Send chunk to bus_comms */
-        status = RADIO_APP_SendFileChunkToBusComms(ChunkBuffer, (uint16)BytesRead, Msg->DestAddress, Msg->DestPort);
-        if (status != CFE_SUCCESS)
-        {
-            /* Close file on transmission error */
-            CloseStatus = OS_close(FileHandle);
-            if (CloseStatus != OS_SUCCESS)
-            {
-                CFE_ES_WriteToSysLog("RADIO: Error closing file after transmission error, RC = 0x%08lX\n",
-                                     (unsigned long)CloseStatus);
-            }
-            RADIO_APP_Data.ErrCounter++;
-            return status;
-        }
+    /* Give TO_Lab time to process EnableOutput and open its UDP socket before CF starts emitting PDUs.
+     * Without this delay, short transfers can complete before TO_Lab forwarding is enabled. */
+    (void)OS_TaskDelay(RADIO_APP_TO_LAB_ENABLE_DELAY_MS);
 
-        TotalBytesSent += BytesRead;
-        ChunkCount++;
-    }
+    /* 2. Send CF_TX_FILE to CF app (CFDP transfer) */
+    basename_ptr = strrchr(Msg->Filename, '/');
+    basename_ptr = (basename_ptr != NULL) ? basename_ptr + 1 : Msg->Filename;
 
-    /* Check for read errors (negative return values indicate errors) */
-    if (BytesRead < 0)
+    memset(&CfCmd, 0, sizeof(CfCmd));
+    CFE_MSG_Init(CFE_MSG_PTR(CfCmd.CommandHeader), CFE_SB_ValueToMsgId(CF_CMD_MID), sizeof(CfCmd));
+    CFE_MSG_SetFcnCode(CFE_MSG_PTR(CfCmd.CommandHeader), CF_TX_FILE_CC);
+
+    CfCmd.Payload.cfdp_class = (uint8)CF_CFDP_CLASS_2;
+    CfCmd.Payload.keep       = 1;
+    CfCmd.Payload.chan_num   = 0;
+    CfCmd.Payload.priority   = 0;
+    CfCmd.Payload.dest_id    = (CF_EntityId_t)RADIO_APP_CFDP_DEST_EID;
+
+    strncpy(CfCmd.Payload.src_filename, Msg->Filename, CF_FILENAME_MAX_LEN - 1);
+    CfCmd.Payload.src_filename[CF_FILENAME_MAX_LEN - 1] = '\0';
+
+    CfCmd.Payload.dst_filename[0] = '/';
+    strncpy(&CfCmd.Payload.dst_filename[1], basename_ptr, CF_FILENAME_MAX_LEN - 2);
+    CfCmd.Payload.dst_filename[CF_FILENAME_MAX_LEN - 1] = '\0';
+
+    status = CFE_SB_TransmitMsg(CFE_MSG_PTR(CfCmd.CommandHeader), true);
+    if (status != CFE_SUCCESS)
     {
-        CFE_EVS_SendEvent(RADIO_APP_FILE_READ_ERR_EID, CFE_EVS_EventType_ERROR,
-                          "RADIO: Error reading file '%s', RC = 0x%08lX", Msg->Filename, (unsigned long)BytesRead);
-        CloseStatus = OS_close(FileHandle);
-        if (CloseStatus != OS_SUCCESS)
-        {
-            CFE_ES_WriteToSysLog("RADIO: Error closing file after read error, RC = 0x%08lX\n",
-                                 (unsigned long)CloseStatus);
-        }
+        CFE_EVS_SendEvent(RADIO_APP_FILE_TX_ERR_EID, CFE_EVS_EventType_ERROR,
+                          "RADIO: Failed to send CF_TX_FILE, RC = 0x%08lX", (unsigned long)status);
         RADIO_APP_Data.ErrCounter++;
-        return CFE_STATUS_EXTERNAL_RESOURCE_FAIL;
+        return status;
     }
 
-    /* Close file */
-    CloseStatus = OS_close(FileHandle);
-    if (CloseStatus != OS_SUCCESS)
-    {
-        CFE_ES_WriteToSysLog("RADIO: Error closing file, RC = 0x%08lX\n", (unsigned long)CloseStatus);
-        /* Log but don't fail the operation */
-    }
-
-    /* Send success event */
     CFE_EVS_SendEvent(RADIO_APP_FILE_TX_INF_EID, CFE_EVS_EventType_INFORMATION,
-                      "RADIO: File transmission completed - File='%s', Bytes=%lu, Chunks=%u", Msg->Filename,
-                      (unsigned long)TotalBytesSent, ChunkCount);
+                      "RADIO: CFDP transfer requested - File='%s' -> '%s', DestEID=%u",
+                      Msg->Filename, CfCmd.Payload.dst_filename, (unsigned int)RADIO_APP_CFDP_DEST_EID);
 
     return CFE_SUCCESS;
 }
