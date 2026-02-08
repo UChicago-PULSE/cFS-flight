@@ -1,0 +1,1 @@
+/usr/bin/cc -Os -DNDEBUG CMakeFiles/csp_client.dir/csp_client.c.o CMakeFiles/csp_posix_helper.dir/csp_posix_helper.c.o -o csp_client  -Wl,-rpath,/home/ubuntu/cFS-flight/apps/bus_comms/fsw/libcsp/build_py ../libcsp.so 

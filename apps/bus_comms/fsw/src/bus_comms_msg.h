@@ -30,4 +30,13 @@ typedef struct {
     uint8_t  data[BUS_COMMS_MAX_SEND_LEN];
 } BUS_COMMS_SendCspCmd_t;
 
+/* Telemetry message published when a CSP packet is received from an external node */
+typedef struct {
+    CFE_MSG_TelemetryHeader_t TlmHdr;
+    uint8_t  src_addr;     /* CSP source address */
+    uint8_t  src_port;     /* CSP source port */
+    uint16_t data_len;     /* payload length */
+    uint8_t  data[BUS_COMMS_MAX_SEND_LEN];
+} BUS_COMMS_CspRxData_t;
+
 #endif /* BUS_COMMS_MSG_H */

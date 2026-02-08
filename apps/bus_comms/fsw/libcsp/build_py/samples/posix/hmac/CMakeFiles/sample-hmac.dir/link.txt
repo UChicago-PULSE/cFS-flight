@@ -1,0 +1,1 @@
+/usr/bin/cc -Os -DNDEBUG "CMakeFiles/sample-hmac.dir/src/main.c.o" -o sample-hmac  -Wl,-rpath,/home/ubuntu/cFS-flight/apps/bus_comms/fsw/libcsp/build_py ../../../libcsp.so 

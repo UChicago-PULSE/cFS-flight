@@ -27,17 +27,23 @@
 #include "cf_msgstruct.h"
 #include "cf_fcncodes.h"
 #include "cf_extern_typedefs.h"
-#include "to_lab_msg.h"
-#include "to_lab_msgids.h"
 #include "osapi.h"
 #include <string.h>
 
-#define RADIO_APP_RADIO_NODE_ADDR  2
-#define RADIO_APP_CONFIG_PORT      7
-#define RADIO_APP_CFDP_DEST_EID   2   /* Python remote (remote.py) entity ID */
-#define RADIO_APP_TO_LAB_DEST_IP  "127.0.0.1"
-#define RADIO_APP_STARTUP_CFDP_SRC "/cf/test.txt"  /* file to transfer on first run */
-#define RADIO_APP_TO_LAB_ENABLE_DELAY_MS 1000      /* allow TO_Lab to process EnableOutput before CF starts sending */
+#define RADIO_APP_RADIO_NODE_ADDR       2   /* CSP addr of the radio (used for non-CFDP traffic) */
+#define RADIO_APP_GROUND_STATION_ADDR   3   /* CSP addr of the ground station (CFDP destination) */
+#define RADIO_APP_CONFIG_PORT           7
+#define RADIO_APP_CFDP_DEST_EID         2   /* CFDP entity ID of the ground station */
+#define RADIO_APP_CFDP_CSP_PORT   15  /* Dedicated CSP port for CFDP PDU traffic (must be <= CSP_PORT_MAX_BIND) */
+
+/*
+ * Offset from SB message start to the raw CFDP PDU payload.
+ * CF builds outgoing PDUs using CF_PduTlmMsg_t layout (cf_cfdp_sbintf.c:117-119),
+ * where the PDU starts immediately after CFE_MSG_TelemetryHeader_t.
+ * This is sizeof(CFE_MSG_TelemetryHeader_t) = offsetof(CF_PduTlmMsg_t, ph).
+ * We compute it here to avoid pulling in CF's heavy internal headers.
+ */
+#define RADIO_APP_CFDP_PDU_OFFSET  sizeof(CFE_MSG_TelemetryHeader_t)
 
 RADIO_APP_Data_t RADIO_APP_Data;
 
@@ -137,18 +143,27 @@ int32 RADIO_APP_Init(void)
         status = CFE_TBL_Load(RADIO_APP_Data.TblHandles[0], CFE_TBL_SRC_FILE, RADIO_APP_TABLE_FILE);
     }
 
+    /* Subscribe to CFDP outgoing PDUs so we can forward them through BUS_COMMS/CSP */
+    status = CFE_SB_Subscribe(CFE_SB_ValueToMsgId(CF_CH0_TX_MID), RADIO_APP_Data.CommandPipe);
+    if (status != CFE_SUCCESS)
+    {
+        CFE_ES_WriteToSysLog("Radio App: Error Subscribing to CF_CH0_TX_MID, RC = 0x%08lX\n", (unsigned long)status);
+        return status;
+    }
+
+    /* Subscribe to incoming CSP data from BUS_COMMS (uplink PDUs from ground station) */
+    status = CFE_SB_Subscribe(CFE_SB_ValueToMsgId(BUS_COMMS_CSP_RX_DATA_MID), RADIO_APP_Data.CommandPipe);
+    if (status != CFE_SUCCESS)
+    {
+        CFE_ES_WriteToSysLog("Radio App: Error Subscribing to BUS_COMMS_CSP_RX_DATA_MID, RC = 0x%08lX\n", (unsigned long)status);
+        return status;
+    }
+
     CFE_EVS_SendEvent(RADIO_APP_STARTUP_INF_EID, CFE_EVS_EventType_INFORMATION, "Radio App Initialized.%s",
                       RADIO_APP_VERSION_STRING);
 
-    /* Trigger one CFDP transfer on startup (TO_LAB_EnableOutput + CF_TX_FILE) */
-    {
-        RADIO_APP_TransmitFileCmd_t StartupCmd;
-
-        memset(&StartupCmd, 0, sizeof(StartupCmd));
-        strncpy(StartupCmd.Filename, RADIO_APP_STARTUP_CFDP_SRC, sizeof(StartupCmd.Filename) - 1);
-        StartupCmd.Filename[sizeof(StartupCmd.Filename) - 1] = '\0';
-        (void)RADIO_APP_TransmitFile(&StartupCmd);
-    }
+    /* NOTE: Startup auto-transfer removed.  File transfers are triggered via
+     * ground command (RADIO_APP_TRANSMIT_FILE_CC) after all apps are up. */
 
     return CFE_SUCCESS;
 }
@@ -168,6 +183,61 @@ void RADIO_APP_ProcessCommandPacket(CFE_SB_Buffer_t *SBBufPtr)
         case RADIO_APP_SEND_HK_MID:
             RADIO_APP_ReportHousekeeping((CFE_MSG_CommandHeader_t *)SBBufPtr);
             break;
+
+        case CF_CH0_TX_MID:
+        {
+            /*
+             * TX path: Forward CFDP PDUs from CF to BUS_COMMS -> radio -> ground station.
+             *
+             * CRITICAL: CF builds outgoing PDUs using CF_PduTlmMsg_t layout
+             * (cf_cfdp_sbintf.c:117-119). The raw CFDP PDU starts at
+             * offsetof(CF_PduTlmMsg_t, ph) = 12 bytes (TLM header size),
+             * regardless of the MID type.
+             */
+            CFE_MSG_Size_t msg_size = 0;
+
+            CFE_MSG_GetSize(&SBBufPtr->Msg, &msg_size);
+
+            if (msg_size > RADIO_APP_CFDP_PDU_OFFSET)
+            {
+                const uint8 *pdu_data = ((const uint8 *)SBBufPtr) + RADIO_APP_CFDP_PDU_OFFSET;
+                uint16       pdu_len  = (uint16)(msg_size - RADIO_APP_CFDP_PDU_OFFSET);
+
+                RADIO_APP_SendFileChunkToBusComms(pdu_data, pdu_len,
+                    RADIO_APP_GROUND_STATION_ADDR, RADIO_APP_CFDP_CSP_PORT);
+            }
+            break;
+        }
+
+        case BUS_COMMS_CSP_RX_DATA_MID:
+        {
+            /*
+             * Uplink path: Forward CFDP ACK/NAK/FIN PDUs from ground station
+             * (via BUS_COMMS CSP receiver) to CF app.
+             *
+             * CRITICAL: CF_CH0_RX_MID is a TLM MID (CFE_PLATFORM_CF_TLM_MIDVAL).
+             * CF's receive path checks CFE_MSG_GetType() and uses
+             * offsetof(CF_PduTlmMsg_t, ph) for TLM-type messages.
+             * We MUST use CF_PduTlmMsg_t (TelemetryHeader), NOT CF_PduCmdMsg_t.
+             */
+            const BUS_COMMS_CspRxData_t *rx = (const BUS_COMMS_CspRxData_t *)SBBufPtr;
+
+            if (rx->src_port == RADIO_APP_CFDP_CSP_PORT && rx->data_len > 0)
+            {
+                uint8              buf[RADIO_APP_CFDP_PDU_OFFSET + BUS_COMMS_MAX_SEND_LEN];
+                CFE_MSG_Message_t *msg   = (CFE_MSG_Message_t *)buf;
+                size_t             total = RADIO_APP_CFDP_PDU_OFFSET + rx->data_len;
+
+                memset(buf, 0, sizeof(buf));
+                CFE_MSG_Init(msg, CFE_SB_ValueToMsgId(CF_CH0_RX_MID), total);
+                memcpy(buf + RADIO_APP_CFDP_PDU_OFFSET, rx->data, rx->data_len);
+                CFE_SB_TransmitMsg(msg, true);
+
+                CFE_EVS_SendEvent(RADIO_APP_FILE_TX_INF_EID, CFE_EVS_EventType_DEBUG,
+                                  "RADIO: Uplink PDU forwarded to CF, len=%u", (unsigned)rx->data_len);
+            }
+            break;
+        }
 
         default:
             CFE_EVS_SendEvent(RADIO_APP_INVALID_MSGID_ERR_EID, CFE_EVS_EventType_ERROR,
@@ -341,9 +411,8 @@ int32 RADIO_APP_TransmitFile(const RADIO_APP_TransmitFileCmd_t *Msg)
 {
     int32                  status;
     size_t                 FilenameLen;
-    const char *          basename_ptr;
-    TO_LAB_EnableOutputCmd_t ToLabCmd;
-    CF_TxFileCmd_t        CfCmd;
+    const char            *basename_ptr;
+    CF_TxFileCmd_t         CfCmd;
 
     RADIO_APP_Data.CmdCounter++;
 
@@ -366,27 +435,9 @@ int32 RADIO_APP_TransmitFile(const RADIO_APP_TransmitFileCmd_t *Msg)
         return CFE_SB_BAD_ARGUMENT;
     }
 
-    /* 1. Enable TO_Lab telemetry output to ground (so CFDP PDUs reach remote.py) */
-    memset(&ToLabCmd, 0, sizeof(ToLabCmd));
-    CFE_MSG_Init(CFE_MSG_PTR(ToLabCmd.CmdHeader), CFE_SB_ValueToMsgId(TO_LAB_CMD_MID), sizeof(ToLabCmd));
-    CFE_MSG_SetFcnCode(CFE_MSG_PTR(ToLabCmd.CmdHeader), TO_LAB_OUTPUT_ENABLE_CC);
-    strncpy(ToLabCmd.Payload.dest_IP, RADIO_APP_TO_LAB_DEST_IP, sizeof(ToLabCmd.Payload.dest_IP) - 1);
-    ToLabCmd.Payload.dest_IP[sizeof(ToLabCmd.Payload.dest_IP) - 1] = '\0';
-
-    status = CFE_SB_TransmitMsg(CFE_MSG_PTR(ToLabCmd.CmdHeader), true);
-    if (status != CFE_SUCCESS)
-    {
-        CFE_EVS_SendEvent(RADIO_APP_FILE_TX_ERR_EID, CFE_EVS_EventType_ERROR,
-                          "RADIO: Failed to send TO_LAB_EnableOutput, RC = 0x%08lX", (unsigned long)status);
-        RADIO_APP_Data.ErrCounter++;
-        return status;
-    }
-
-    /* Give TO_Lab time to process EnableOutput and open its UDP socket before CF starts emitting PDUs.
-     * Without this delay, short transfers can complete before TO_Lab forwarding is enabled. */
-    (void)OS_TaskDelay(RADIO_APP_TO_LAB_ENABLE_DELAY_MS);
-
-    /* 2. Send CF_TX_FILE to CF app (CFDP transfer) */
+    /* Send CF_TX_FILE to CF app -- PDUs will flow through the SB back to us
+     * (CF_CH0_TX_MID case in ProcessCommandPacket), then out via BUS_COMMS/CSP
+     * to the radio-mock and ground-station. */
     basename_ptr = strrchr(Msg->Filename, '/');
     basename_ptr = (basename_ptr != NULL) ? basename_ptr + 1 : Msg->Filename;
 
@@ -493,15 +544,14 @@ int32 RADIO_APP_SendFileChunkToBusComms(const uint8 *ChunkData, uint16 ChunkSize
         return CFE_STATUS_EXTERNAL_RESOURCE_FAIL;
     }
 
-    memset(&BusCommsCmd, 0, sizeof(BusCommsCmd));
+    /* CFE_MSG_Init zeroes the entire struct, so it MUST be called first */
+    CFE_MSG_Init(CFE_MSG_PTR(BusCommsCmd.CmdHdr), CFE_SB_ValueToMsgId(BUS_COMMS_CMD_MID), sizeof(BusCommsCmd));
+    CFE_MSG_SetFcnCode(CFE_MSG_PTR(BusCommsCmd.CmdHdr), BUS_COMMS_SEND_CSP_CC);
 
     memcpy(BusCommsCmd.data, ChunkData, ChunkSize);
     BusCommsCmd.dest = DestAddr;
     BusCommsCmd.port = DestPort;
     BusCommsCmd.len  = ChunkSize;
-
-    CFE_MSG_Init(CFE_MSG_PTR(BusCommsCmd.CmdHdr), CFE_SB_ValueToMsgId(BUS_COMMS_CMD_MID), sizeof(BusCommsCmd));
-    CFE_MSG_SetFcnCode(CFE_MSG_PTR(BusCommsCmd.CmdHdr), BUS_COMMS_SEND_CSP_CC);
 
     status = CFE_SB_TransmitMsg(CFE_MSG_PTR(BusCommsCmd.CmdHdr), true);
     if (status != CFE_SUCCESS)

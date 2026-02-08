@@ -1,0 +1,1 @@
+/usr/bin/cc -fPIC -Os -DNDEBUG -shared  -o libcsp_py3.cpython-312-x86_64-linux-gnu.so CMakeFiles/libcsp_py3.dir/src/bindings/python/pycsp.c.o  -Wl,-rpath,/home/ubuntu/cFS-flight/apps/bus_comms/fsw/libcsp/build_py libcsp.so 

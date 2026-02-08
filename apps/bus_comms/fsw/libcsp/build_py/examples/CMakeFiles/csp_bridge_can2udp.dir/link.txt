@@ -1,0 +1,1 @@
+/usr/bin/cc -Os -DNDEBUG CMakeFiles/csp_bridge_can2udp.dir/csp_bridge_can2udp.c.o -o csp_bridge_can2udp  -Wl,-rpath,/home/ubuntu/cFS-flight/apps/bus_comms/fsw/libcsp/build_py ../libcsp.so 

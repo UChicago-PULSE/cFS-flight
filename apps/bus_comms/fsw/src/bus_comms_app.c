@@ -32,9 +32,17 @@ extern int32 OS_Milli2Ticks(uint32 milli_seconds, int *ticks);
 #define BUS_COMMS_CSP_PORT       10
 
 // Child task IDs
-static CFE_ES_TaskId_t BUS_COMMS_CSP_RouterTaskId   = CFE_ES_TASKID_UNDEFINED;
-static CFE_ES_TaskId_t BUS_COMMS_CSP_ReceiverTaskId = CFE_ES_TASKID_UNDEFINED;
-static CFE_ES_TaskId_t BUS_COMMS_CSP_TxTaskId       = CFE_ES_TASKID_UNDEFINED;
+static CFE_ES_TaskId_t BUS_COMMS_CSP_RouterTaskId     = CFE_ES_TASKID_UNDEFINED;
+static CFE_ES_TaskId_t BUS_COMMS_CSP_ReceiverTaskId   = CFE_ES_TASKID_UNDEFINED;
+static CFE_ES_TaskId_t BUS_COMMS_CSP_TxTaskId         = CFE_ES_TASKID_UNDEFINED;
+static CFE_ES_TaskId_t BUS_COMMS_CSP_CfdpRxTaskId     = CFE_ES_TASKID_UNDEFINED;
+
+/* Dedicated CSP port for CFDP PDU traffic (uplink from ground station).
+ * Must be <= CSP_PORT_MAX_BIND (16) and not conflict with port 10 (general BUS_COMMS). */
+#define BUS_COMMS_CSP_CFDP_PORT  15
+
+/* Forward declarations for child tasks */
+static void BUS_COMMS_CSP_CfdpReceiverTask(void);
 
 // New command codes (define locally if not provided by headers)
 #ifndef BUS_COMMS_LIST_ROUTES_CC
@@ -259,6 +267,21 @@ int32 BUS_COMMS_AppInit(void)
             return status;
         }
 
+        // CFDP receiver child task (dedicated port 20 for uplink PDUs)
+        status = CFE_ES_CreateChildTask(
+            &BUS_COMMS_CSP_CfdpRxTaskId,
+            "BC_CFDP_RX",
+            BUS_COMMS_CSP_CfdpReceiverTask,
+            NULL,
+            16384,
+            50,
+            0
+        );
+        if (status != CFE_SUCCESS) {
+            CFE_ES_WriteToSysLog("BUS_COMMS: CreateChildTask CFDP RX failed RC=0x%08lX\n", (unsigned long)status);
+            return status;
+        }
+
         
     } while (0);
 
@@ -433,6 +456,67 @@ static void BUS_COMMS_CSP_ReceiverTask(void)
     CFE_ES_ExitChildTask();
 }
 
+
+// Child task: dedicated CFDP CSP receiver on port 20
+// Receives CSP packets from ground station (via radio-mock) and publishes them to the SB
+static void BUS_COMMS_CSP_CfdpReceiverTask(void)
+{
+    csp_socket_t sock;
+    memset(&sock, 0, sizeof(sock));
+
+    csp_bind(&sock, BUS_COMMS_CSP_CFDP_PORT);
+    csp_listen(&sock, 10);
+
+    CFE_ES_WriteToSysLog("BUS_COMMS: CFDP RX task listening on CSP port %d\n",
+                         BUS_COMMS_CSP_CFDP_PORT);
+
+    for (;;)
+    {
+        csp_conn_t *conn = csp_accept(&sock, 1000);
+        if (conn == NULL)
+            continue;
+
+        csp_packet_t *packet = csp_read(conn, 1000);
+        if (packet)
+        {
+            uint8_t  src   = csp_conn_src(conn);
+            uint16_t dport = csp_conn_dport(conn);
+
+            if (packet->length > 0 && packet->length <= BUS_COMMS_MAX_SEND_LEN)
+            {
+                BUS_COMMS_CspRxData_t rxMsg;
+                memset(&rxMsg, 0, sizeof(rxMsg));
+
+                CFE_MSG_Init(CFE_MSG_PTR(rxMsg.TlmHdr),
+                             CFE_SB_ValueToMsgId(BUS_COMMS_CSP_RX_DATA_MID),
+                             sizeof(BUS_COMMS_CspRxData_t));
+                CFE_MSG_SetMsgTime(CFE_MSG_PTR(rxMsg.TlmHdr), CFE_TIME_GetTime());
+
+                rxMsg.src_addr = src;
+                rxMsg.src_port = (uint8_t)dport;
+                rxMsg.data_len = packet->length;
+                memcpy(rxMsg.data, packet->data, packet->length);
+
+                CFE_SB_TransmitMsg(CFE_MSG_PTR(rxMsg.TlmHdr), true);
+
+                CFE_ES_WriteToSysLog("BUS_COMMS: CFDP RX from %u:%u len=%u -> SB\n",
+                                     src, dport, (unsigned)packet->length);
+            }
+            else
+            {
+                CFE_ES_WriteToSysLog("BUS_COMMS: CFDP RX from %u:%u dropped (len=%u)\n",
+                                     src, dport, (unsigned)packet->length);
+            }
+
+            BUS_COMMS_RouteUpdateRx(src, dport);
+            csp_buffer_free(packet);
+        }
+
+        csp_close(conn);
+    }
+
+    CFE_ES_ExitChildTask();
+}
 
 // Child task: periodic CSP transmitter
 static void BUS_COMMS_CSP_TxTask(void)

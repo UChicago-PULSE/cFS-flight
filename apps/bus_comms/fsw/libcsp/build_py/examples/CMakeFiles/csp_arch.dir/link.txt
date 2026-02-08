@@ -1,0 +1,1 @@
+/usr/bin/cc -Os -DNDEBUG CMakeFiles/csp_arch.dir/csp_arch.c.o -o csp_arch  -Wl,-rpath,/home/ubuntu/cFS-flight/apps/bus_comms/fsw/libcsp/build_py ../libcsp.so 

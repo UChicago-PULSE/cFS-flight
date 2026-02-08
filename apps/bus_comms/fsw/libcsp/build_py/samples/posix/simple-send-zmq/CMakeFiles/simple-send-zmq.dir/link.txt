@@ -1,0 +1,1 @@
+/usr/bin/cc -Os -DNDEBUG "CMakeFiles/simple-send-zmq.dir/src/main.c.o" -o simple-send-zmq  -Wl,-rpath,/home/ubuntu/cFS-flight/apps/bus_comms/fsw/libcsp/build_py ../../../libcsp.so 
