@@ -43,6 +43,7 @@ target_compile_definitions(csp PUBLIC
 target_link_libraries(csp PUBLIC ${SOCKETCAN_LIB})
 
 add_cfe_app(bus_comms fsw/src/bus_comms_app.c)
+add_cfe_tables(bus_comms fsw/tables/bus_comms_tbl.c)
 
 target_include_directories(bus_comms PUBLIC
   fsw/mission_inc

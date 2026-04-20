@@ -13,11 +13,14 @@
 
 #include <csp/csp.h>
 #include <csp/csp_debug.h>
+#include <csp/csp_rtable.h>
 #include <csp/interfaces/csp_if_can.h>
 #include <csp/drivers/can_socketcan.h>
+#include <csp/drivers/usart.h>
 
 #include "cfe_time.h"
 #include "cfe_psp.h"
+#include "cfe_tbl.h"
 #include "osapi.h"
 
 extern int32 OS_Milli2Ticks(uint32 milli_seconds, int *ticks);
@@ -25,6 +28,10 @@ extern int32 OS_Milli2Ticks(uint32 milli_seconds, int *ticks);
 /* CSP configuration */
 #define BUS_COMMS_CSP_CAN_IF     "can1"
 #define BUS_COMMS_CSP_BITRATE    0
+#define BUS_COMMS_CSP_RS422_IF   "RS422"
+#define BUS_COMMS_CSP_RS422_DEV  "/dev/ttyUSB0"
+#define BUS_COMMS_CSP_RS422_BAUD 115200
+
 #define BUS_COMMS_CSP_MY_ADDR    1
 #define BUS_COMMS_CSP_DEST_ADDR  2
 #define BUS_COMMS_CSP_PORT       10
@@ -36,6 +43,7 @@ extern int32 OS_Milli2Ticks(uint32 milli_seconds, int *ticks);
 static CFE_ES_TaskId_t BUS_COMMS_CSP_RouterTaskId   = CFE_ES_TASKID_UNDEFINED;
 static CFE_ES_TaskId_t BUS_COMMS_CSP_ReceiverTaskId = CFE_ES_TASKID_UNDEFINED;
 static CFE_ES_TaskId_t BUS_COMMS_SBN_RxTaskId       = CFE_ES_TASKID_UNDEFINED;
+static CFE_ES_TaskId_t BUS_COMMS_CSP_TxTaskId       = CFE_ES_TASKID_UNDEFINED;
 
 /* Command codes */
 #ifndef BUS_COMMS_SEND_CSP_CC
@@ -100,6 +108,7 @@ typedef struct {
 static void BUS_COMMS_CSP_RouterTask(void);
 static void BUS_COMMS_CSP_ReceiverTask(void);
 static void BUS_COMMS_SBN_RxTask(void);
+static void BUS_COMMS_CSP_TxTask(void);
 static void BUS_COMMS_RouteUpdateRx(uint8_t addr, uint16_t port);
 static void BUS_COMMS_RouteUpdateTx(uint8_t addr, uint16_t port);
 static int  BUS_COMMS_CSP_Send(uint8_t dest, uint8_t port, const void *data, uint16_t len);
@@ -144,6 +153,7 @@ void BUS_COMMS_AppMain(void)
     {
         CFE_ES_PerfLogExit(BUS_COMMS_APP_PERF_ID);
 
+        /* Block waiting for the next msg */
         status = CFE_SB_ReceiveBuffer(&SBBufPtr, BUS_COMMS_AppData.CmdPipe, CFE_SB_PEND_FOREVER);
 
         CFE_ES_PerfLogEntry(BUS_COMMS_APP_PERF_ID);
@@ -154,13 +164,16 @@ void BUS_COMMS_AppMain(void)
         }
         else
         {
-            CFE_EVS_SendEvent(BUS_COMMS_PIPE_ERR_EID, CFE_EVS_EventType_ERROR,
-                              "BUS_COMMS: SB Pipe Read Error, App Will Exit");
+            CFE_ES_WriteToSysLog("BUS_COMMS: Error reading cmd pipe, RC = 0x%08lX\n", (unsigned long)status);
             BUS_COMMS_AppData.RunStatus = CFE_ES_RunStatus_APP_ERROR;
         }
+
+        /* Let cFE manage the table (allows ground updates) */
+        CFE_TBL_ReleaseAddress(BUS_COMMS_AppData.TblHandle);
+        CFE_TBL_Manage(BUS_COMMS_AppData.TblHandle);
+        CFE_TBL_GetAddress((void **)&BUS_COMMS_AppData.TblPtr, BUS_COMMS_AppData.TblHandle);
     }
 
-    CFE_ES_PerfLogExit(BUS_COMMS_APP_PERF_ID);
     CFE_ES_ExitApp(BUS_COMMS_AppData.RunStatus);
 }
 
@@ -188,6 +201,26 @@ int32 BUS_COMMS_AppInit(void)
 
     CFE_MSG_Init(CFE_MSG_PTR(BUS_COMMS_AppData.HkTlm.TelemetryHeader), CFE_SB_ValueToMsgId(BUS_COMMS_HK_TLM_MID),
                  sizeof(BUS_COMMS_AppData.HkTlm));
+
+    /* Register and load the Configuration Table */
+    status = CFE_TBL_Register(&BUS_COMMS_AppData.TblHandle, "ConfigTbl",
+                              sizeof(BUS_COMMS_Table_t), CFE_TBL_OPT_DEFAULT, NULL);
+    if (status != CFE_SUCCESS) {
+        CFE_ES_WriteToSysLog("BUS_COMMS: Error registering table, RC = 0x%08lX\n", (unsigned long)status);
+        return status;
+    }
+
+    status = CFE_TBL_Load(BUS_COMMS_AppData.TblHandle, CFE_TBL_SRC_FILE, BUS_COMMS_TABLE_FILE);
+    if (status != CFE_SUCCESS && status != CFE_TBL_INFO_UPDATED) {
+        CFE_ES_WriteToSysLog("BUS_COMMS: Error loading table, RC = 0x%08lX\n", (unsigned long)status);
+        /* Non-critical error, we'll just not have table data initially if file is missing */
+    }
+
+    status = CFE_TBL_GetAddress((void **)&BUS_COMMS_AppData.TblPtr, BUS_COMMS_AppData.TblHandle);
+    if (status != CFE_SUCCESS && status != CFE_TBL_INFO_UPDATED) {
+        /* Fallback if table not completely loaded */
+        BUS_COMMS_AppData.TblPtr = NULL;
+    }
 
     /* Create command pipe for ground commands and HK requests */
     status = CFE_SB_CreatePipe(&BUS_COMMS_AppData.CmdPipe, BUS_COMMS_AppData.PipeDepth, BUS_COMMS_AppData.PipeName);
@@ -240,6 +273,10 @@ int32 BUS_COMMS_AppInit(void)
     do {
         int err;
         csp_iface_t *iface = NULL;
+        csp_iface_t *usart_iface = NULL;
+
+        /* Use CSP v1 protocol framing (5-bit address, 32-bit header) */
+        csp_conf.version = 1;
 
         csp_init();
         csp_dbg_packet_print = 1;
@@ -256,6 +293,28 @@ int32 BUS_COMMS_AppInit(void)
             return CFE_STATUS_EXTERNAL_RESOURCE_FAIL;
         }
         iface->is_default = 1;
+
+        /* Setup RS422/USART interface via KISS */
+        csp_usart_conf_t usart_conf = {
+            .device = BUS_COMMS_CSP_RS422_DEV,
+            .baudrate = BUS_COMMS_CSP_RS422_BAUD,
+            .databits = 8,
+            .stopbits = 1,
+            .paritysetting = 0,
+        };
+        err = csp_usart_open_and_add_kiss_interface(
+            &usart_conf,
+            "KISS",
+            g_csp_my_addr,
+            &usart_iface);
+        if (err != CSP_ERR_NONE || usart_iface == NULL) {
+            CFE_ES_WriteToSysLog("BUS_COMMS: CSP RS422 open failed err=%d\n", err);
+            // Non-critical: continue anyway or handle failure as needed
+        } else {
+            /* Example: explicitly route a destination node (e.g. node 3) via RS422 */
+            /* In a real app, adjust routing tables accordingly if using multiple interfaces. */
+            csp_rtable_set(3, 0, usart_iface, CSP_NO_VIA_ADDRESS);
+        }
 
         /* CSP Router task - handles internal CSP routing */
         status = CFE_ES_CreateChildTask(
@@ -300,6 +359,21 @@ int32 BUS_COMMS_AppInit(void)
         );
         if (status != CFE_SUCCESS) {
             CFE_ES_WriteToSysLog("BUS_COMMS: CreateChildTask SBN RX failed RC=0x%08lX\n", (unsigned long)status);
+            return status;
+        }
+
+        /* TX child task - periodic heartbeat processing based on table */
+        status = CFE_ES_CreateChildTask(
+            &BUS_COMMS_CSP_TxTaskId,
+            "BC_CSP_TX",
+            BUS_COMMS_CSP_TxTask,
+            NULL,
+            16384,
+            55,
+            0
+        );
+        if (status != CFE_SUCCESS) {
+            CFE_ES_WriteToSysLog("BUS_COMMS: CreateChildTask TX failed RC=0x%08lX\n", (unsigned long)status);
             return status;
         }
 
@@ -568,7 +642,53 @@ static void BUS_COMMS_SBN_RxTask(void)
 }
 
 /*
- * Process a CAN request - send data over CAN to the destination node.
+ * CSP periodic transmitter - pulls from Configuration Table to determine 
+ * if a heartbeat ping should be sent and how often.
+ */
+static void BUS_COMMS_CSP_TxTask(void)
+{
+    const char payload[] = "BUS_COMMS periodic ping";
+    int        delay_ticks = 0;
+
+    CFE_ES_WriteToSysLog("BUS_COMMS: TX task started\n");
+
+    while (1)
+    {
+        /* Lock the table pointers automatically or read values defensively. 
+         * Since TblPtr is updated by AppMain, we just check if it's safe. */
+        bool heartbeat_enabled = false;
+        uint32_t interval_ms = 25000;
+
+        if (BUS_COMMS_AppData.TblPtr != NULL) {
+            heartbeat_enabled = (BUS_COMMS_AppData.TblPtr->HeartbeatEnabled > 0);
+            interval_ms = BUS_COMMS_AppData.TblPtr->HeartbeatInterval_ms;
+        }
+
+        if (heartbeat_enabled)
+        {
+            if (BUS_COMMS_CSP_Send(g_csp_dest_addr, BUS_COMMS_CSP_PORT, payload, (uint16_t)(sizeof(payload) - 1)) != 0)
+            {
+                CFE_ES_WriteToSysLog("BUS_COMMS: periodic CSP send failed\n");
+            }
+        }
+
+        if (interval_ms < 1000) {
+            interval_ms = 1000; /* safeguard to not flood/starve the CPU */
+        }
+
+        if (OS_Milli2Ticks(interval_ms, &delay_ticks) != OS_SUCCESS || delay_ticks <= 0)
+        {
+            delay_ticks = 25000;
+        }
+
+        OS_TaskDelay((uint32)delay_ticks);
+    }
+
+    CFE_ES_ExitChildTask();
+}
+
+/*
+ * Process a CAN request and send data over CAN to the destination node.
  * Publishes a response (success or error) back to the requesting app.
  */
 static void BUS_COMMS_ProcessCanRequest(const BUS_COMMS_CanRequest_t *req)

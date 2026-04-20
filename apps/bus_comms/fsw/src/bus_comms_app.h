@@ -14,6 +14,7 @@
 #include "bus_comms_perfids.h"
 #include "bus_comms_msgids.h"
 #include "bus_comms_msg.h"
+#include "bus_comms_table.h"
 
 #define BUS_COMMS_APP_PIPE_DEPTH 32
 
@@ -30,6 +31,9 @@ typedef struct
 
     char   PipeName[CFE_MISSION_MAX_API_LEN];
     uint16 PipeDepth;
+
+    CFE_TBL_Handle_t   TblHandle;
+    BUS_COMMS_Table_t *TblPtr;
 } BUS_COMMS_AppData_t;
 
 extern BUS_COMMS_AppData_t BUS_COMMS_AppData;

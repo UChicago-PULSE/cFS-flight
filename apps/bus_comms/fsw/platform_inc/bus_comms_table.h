@@ -20,6 +20,8 @@ typedef struct
 
 typedef struct
 {
+    uint8_t  HeartbeatEnabled;
+    uint32_t HeartbeatInterval_ms;
     BUS_COMMS_DeviceEntry_t entries[16];
 } BUS_COMMS_Table_t;
 
