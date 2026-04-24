@@ -13,6 +13,7 @@ add_cfe_tables(sample_app fsw/tables/sample_app_tbl.c)
 target_include_directories(sample_app PUBLIC
   fsw/mission_inc
   fsw/platform_inc
+  ../adcs_app/fsw/platform_inc
 )
 
 # If UT is enabled, then add the tests from the subdirectory

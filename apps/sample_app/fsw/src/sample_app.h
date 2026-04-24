@@ -37,7 +37,8 @@
 #include "sample_app_perfids.h"
 #include "sample_app_msgids.h"
 #include "sample_app_msg.h"
-
+#include "adcs_app_inter_mids.h"
+#include "adcs_app_msgids.h"
 /***********************************************************************/
 #define SAMPLE_APP_PIPE_DEPTH 32 /* Depth of the Command Pipe for Application */
 

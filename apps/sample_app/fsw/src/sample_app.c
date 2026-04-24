@@ -137,7 +137,7 @@ int32 SAMPLE_APP_Init(void)
         CFE_ES_WriteToSysLog("Sample App: Error Registering Events, RC = 0x%08lX\n", (unsigned long)status);
         return status;
     }
-
+    
     /*
     ** Initialize housekeeping packet (clear user data area).
     */
@@ -265,6 +265,32 @@ void SAMPLE_APP_ProcessGroundCommand(CFE_SB_Buffer_t *SBBufPtr)
                 SAMPLE_APP_Process((SAMPLE_APP_ProcessCmd_t *)SBBufPtr);
             }
 
+            break;
+
+        case SAMPLE_APP_SENDPNTSUN_CC:
+            if (SAMPLE_APP_VerifyCmdLength(&SBBufPtr->Msg, sizeof(SAMPLE_APP_SendPntSun_t))){
+                
+                ADCS_APP_PntSun_t cmd;
+                CFE_SB_MsgId_t MID = CFE_SB_ValueToMsgId(ADCS_APP_INT_CMD_MID);
+
+                CFE_MSG_Init(&cmd.CmdHeader.Msg, MID, sizeof(cmd));
+                CFE_MSG_SetFcnCode(&cmd.CmdHeader.Msg, ADCS_SUN_POINT_CC);
+                CFE_SB_TransmitMsg(&cmd.CmdHeader.Msg, true);
+                CFE_EVS_SendEvent(SAMPLE_APP_SENT_ADCS_EID, CFE_EVS_EventType_INFORMATION, "SAMPLE: toadcs command 1 %s",
+                      SAMPLE_APP_VERSION);
+            }
+            break;
+        
+        case SAMPLE_APP_SENDTRNSUN_CC:
+            if (SAMPLE_APP_VerifyCmdLength(&SBBufPtr->Msg, sizeof(Sample_APP_SendTrnSun_t))){
+                ADCS_APP_TrnSun_t cmd;
+                CFE_SB_MsgId_t MID = CFE_SB_ValueToMsgId(ADCS_APP_INT_CMD_MID);
+
+                CFE_MSG_Init(&cmd.CmdHeader.Msg, MID, sizeof(cmd));
+                CFE_MSG_SetFcnCode(&cmd.CmdHeader.Msg, ADCS_TURN_FROM_SUN_CC);
+                CFE_SB_TransmitMsg(&cmd.CmdHeader.Msg, true);
+                CFE_EVS_SendEvent(SAMPLE_APP_SENT_ADCS_EID, CFE_EVS_EventType_INFORMATION, "SAMPLE: toadcs command 2");
+            }
             break;
 
         /* default case already found during FC vs length test */

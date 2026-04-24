@@ -31,7 +31,8 @@
 #define SAMPLE_APP_NOOP_CC           0
 #define SAMPLE_APP_RESET_COUNTERS_CC 1
 #define SAMPLE_APP_PROCESS_CC        2
-
+#define SAMPLE_APP_SENDPNTSUN_CC     3
+#define SAMPLE_APP_SENDTRNSUN_CC     4
 /*************************************************************************/
 
 /*
@@ -52,7 +53,8 @@ typedef struct
 typedef SAMPLE_APP_NoArgsCmd_t SAMPLE_APP_NoopCmd_t;
 typedef SAMPLE_APP_NoArgsCmd_t SAMPLE_APP_ResetCountersCmd_t;
 typedef SAMPLE_APP_NoArgsCmd_t SAMPLE_APP_ProcessCmd_t;
-
+typedef SAMPLE_APP_NoArgsCmd_t SAMPLE_APP_SendPntSun_t;
+typedef SAMPLE_APP_NoArgsCmd_t Sample_APP_SendTrnSun_t;
 /*************************************************************************/
 /*
 ** Type definition (SAMPLE App housekeeping)
